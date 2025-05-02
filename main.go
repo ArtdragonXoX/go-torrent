@@ -6,10 +6,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/archeryue/go-torrent/torrent"
+	"bt_download/torrent"
 )
 
 func main() {
+	// 检查命令行参数
+	if len(os.Args) < 2 {
+		fmt.Println("用法: main.exe <torrent文件路径>")
+		return
+	}
 	//parse torrent file
 	file, err := os.Open(os.Args[1])
 	if err != nil {

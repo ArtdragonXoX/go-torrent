@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/archeryue/go-torrent/bencode"
+	"bt_download/bencode"
 )
 
 type rawInfo struct {
