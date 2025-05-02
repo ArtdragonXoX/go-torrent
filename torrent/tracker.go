@@ -226,7 +226,7 @@ func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) []Pe
 func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
 	// 获取所有Tracker服务器地址
 	trackers := []string{tf.Announce}
-	backupTrackers := readBackupTrackers("d:\\Code\\BT下载\\tracker.txt")
+	backupTrackers := readBackupTrackers(".\\tracker.txt")
 	if backupTrackers != nil {
 		trackers = append(trackers, backupTrackers...)
 	}
