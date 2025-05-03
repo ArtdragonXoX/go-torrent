@@ -29,6 +29,14 @@ type PeerMsg struct {
 	Payload []byte
 }
 
+// NewDHTNodesMsg 创建一个用于交换DHT节点的消息
+func NewDHTNodesMsg(nodesData []byte) *PeerMsg {
+	return &PeerMsg{
+		Id:      MsgDHTNodes,
+		Payload: nodesData,
+	}
+}
+
 type PeerConn struct {
 	net.Conn
 	Choked  bool
@@ -36,6 +44,7 @@ type PeerConn struct {
 	peer    PeerInfo
 	peerId  [IDLEN]byte
 	infoSHA [SHALEN]byte
+	task    *TorrentTask // 添加对TorrentTask的引用
 }
 
 func handshake(conn net.Conn, infoSHA [SHALEN]byte, peerId [IDLEN]byte) error {
@@ -45,18 +54,18 @@ func handshake(conn net.Conn, infoSHA [SHALEN]byte, peerId [IDLEN]byte) error {
 	req := NewHandShakeMsg(infoSHA, peerId)
 	_, err := WriteHandShake(conn, req)
 	if err != nil {
-		fmt.Println("send handshake failed")
+		// fmt.Println("send handshake failed")
 		return err
 	}
 	// read HandshakeMsg
 	res, err := ReadHandshake(conn)
 	if err != nil {
-		fmt.Println("read handshake failed")
+		// fmt.Println("read handshake failed")
 		return err
 	}
 	// check HandshakeMsg
 	if !bytes.Equal(res.InfoSHA[:], infoSHA[:]) {
-		fmt.Println("check handshake failed")
+		// fmt.Println("check handshake failed")
 		return fmt.Errorf("handshake msg error: " + string(res.InfoSHA[:]))
 	}
 	return nil
@@ -99,10 +108,38 @@ func (c *PeerConn) ReadMsg() (*PeerMsg, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &PeerMsg{
+
+	msg := &PeerMsg{
 		Id:      MsgId(msgBuf[0]),
 		Payload: msgBuf[1:],
-	}, nil
+	}
+
+	// 如果是DHT节点消息，并且任务和DHT网络可用，直接处理
+	if msg.Id == MsgDHTNodes && c.task != nil && c.task.DHT != nil {
+		// 在这里不直接处理，让上层调用者处理
+		// 因为这里可能在不同的goroutine中执行
+
+		// 如果是空的DHT节点请求（payload为空），则自动回复我们的DHT节点
+		if len(msg.Payload) == 0 {
+			// 这是一个DHT节点请求，自动回复我们的DHT节点
+			peerKey := fmt.Sprintf("%s:%d", c.peer.Ip.String(), c.peer.Port)
+			fmt.Printf("收到来自Peer %s 的DHT节点请求，准备回复\n", peerKey)
+
+			// 编码本地DHT节点并发送给peer
+			nodesData := c.task.DHT.EncodeNodes()
+			if len(nodesData) > 0 {
+				dhtMsg := NewDHTNodesMsg(nodesData)
+				_, err := c.WriteMsg(dhtMsg)
+				if err != nil {
+					fmt.Printf("向Peer %s 回复DHT节点信息失败: %v\n", peerKey, err)
+				} else {
+					fmt.Printf("向Peer %s 回复了DHT节点信息\n", peerKey)
+				}
+			}
+		}
+	}
+
+	return msg, nil
 }
 
 const LenBytes uint32 = 4
@@ -162,18 +199,18 @@ func NewRequestMsg(index, offset, length int) *PeerMsg {
 	return &PeerMsg{MsgRequest, payload}
 }
 
-func NewConn(peer PeerInfo, infoSHA [SHALEN]byte, peerId [IDLEN]byte) (*PeerConn, error) {
+func NewConn(peer PeerInfo, infoSHA [SHALEN]byte, peerId [IDLEN]byte, task *TorrentTask) (*PeerConn, error) {
 	// setup tcp conn
 	addr := net.JoinHostPort(peer.Ip.String(), strconv.Itoa(int(peer.Port)))
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
-		fmt.Println("set tcp conn failed: " + addr)
+		// fmt.Println("set tcp conn failed: " + addr)
 		return nil, err
 	}
 	// torrent p2p handshake
 	err = handshake(conn, infoSHA, peerId)
 	if err != nil {
-		fmt.Println("handshake failed")
+		// fmt.Println("handshake failed")
 		conn.Close()
 		return nil, err
 	}
@@ -183,11 +220,12 @@ func NewConn(peer PeerInfo, infoSHA [SHALEN]byte, peerId [IDLEN]byte) (*PeerConn
 		peer:    peer,
 		peerId:  peerId,
 		infoSHA: infoSHA,
+		task:    task,
 	}
 	// fill bitfield
 	err = fillBitfield(c)
 	if err != nil {
-		fmt.Println("fill bitfield failed, " + err.Error())
+		// fmt.Println("fill bitfield failed, " + err.Error())
 		return nil, err
 	}
 	return c, nil

@@ -26,8 +26,9 @@ const (
 const IDLEN int = 20
 
 type PeerInfo struct {
-	Ip   net.IP
-	Port uint16
+	Ip       net.IP
+	Port     uint16
+	LastSeen time.Time
 }
 
 type TrackerResp struct {
@@ -67,6 +68,7 @@ func buildPeerInfo(peers []byte) []PeerInfo {
 		offset := i * PeerLen
 		infos[i].Ip = net.IP(peers[offset : offset+IpLen])
 		infos[i].Port = binary.BigEndian.Uint16(peers[offset+IpLen : offset+PeerLen])
+		infos[i].LastSeen = time.Now()
 	}
 	return infos
 }
