@@ -19,10 +19,12 @@ import (
 )
 
 const (
-	PeerPort int = 6666
-	IpLen    int = 4
-	PortLen  int = 2
-	PeerLen  int = IpLen + PortLen
+	PeerPort  int = 6666
+	IpV4Len   int = 4
+	IpV6Len   int = 16
+	PortLen   int = 2
+	PeerV4Len int = IpV4Len + PortLen
+	PeerV6Len int = IpV6Len + PortLen
 )
 
 const IDLEN int = 20
@@ -36,6 +38,7 @@ type PeerInfo struct {
 type TrackerResp struct {
 	Interval       int    `bencode:"interval"`
 	Peers          string `bencode:"peers"`
+	Peers6         string `bencode:"peers6"` // IPv6 peers列表
 	Complete       int    `bencode:"complete"`
 	Incomplete     int    `bencode:"incomplete"`
 	MinInterval    int    `bencode:"min interval"`
@@ -73,6 +76,8 @@ func buildUrl(tf *TorrentFile, peerId [IDLEN]byte) (string, error) {
 	params.Set("downloaded", "0")
 	params.Set("compact", "1") // 请求紧凑的peer列表格式
 	params.Set("left", strconv.Itoa(tf.FileLen))
+	// 添加ipv6=1参数，表示客户端支持IPv6
+	params.Set("ipv6", "1")
 
 	// 添加event=started参数，表示这是初始请求
 	params.Set("event", "started")
@@ -90,7 +95,9 @@ func buildUrl(tf *TorrentFile, peerId [IDLEN]byte) (string, error) {
 }
 
 // buildPeerInfo 解析二进制格式的peer信息列表
-// 每个peer占用6字节，前4字节为IP地址，后2字节为端口
+// 支持两种格式：
+// 1. IPv4格式：每个peer占用6字节，前4字节为IPv4地址，后2字节为端口
+// 2. IPv6格式：每个peer占用18字节，前16字节为IPv6地址，后2字节为端口
 // 返回解析后的PeerInfo结构体切片
 func buildPeerInfo(peers []byte) []PeerInfo {
 	// 检查输入数据
@@ -99,20 +106,54 @@ func buildPeerInfo(peers []byte) []PeerInfo {
 		return nil
 	}
 
-	num := len(peers) / PeerLen
-	if len(peers)%PeerLen != 0 {
-		fmt.Printf("[ERROR] 收到格式不正确的peers数据: 长度=%d字节，不是%d的倍数\n", len(peers), PeerLen)
-		return nil
+	// 尝试判断是IPv4还是IPv6格式
+	var isIPv6 bool
+	var peerLen int
+
+	// 检查数据长度是否符合IPv4或IPv6格式
+	if len(peers)%PeerV4Len == 0 {
+		isIPv6 = false
+		peerLen = PeerV4Len
+		fmt.Printf("[DEBUG] 检测到IPv4格式的peers数据\n")
+	} else if len(peers)%PeerV6Len == 0 {
+		isIPv6 = true
+		peerLen = PeerV6Len
+		fmt.Printf("[DEBUG] 检测到IPv6格式的peers数据\n")
+	} else {
+		// 尝试按照BEP-32规范检查是否为混合格式
+		// 如果第一个字节是0x02，表示IPv6格式
+		if len(peers) > 0 && peers[0] == 0x02 && (len(peers)-1)%PeerV6Len == 0 {
+			// 跳过第一个字节
+			peers = peers[1:]
+			isIPv6 = true
+			peerLen = PeerV6Len
+			fmt.Printf("[DEBUG] 检测到BEP-32格式的IPv6 peers数据\n")
+		} else {
+			fmt.Printf("[ERROR] 收到格式不正确的peers数据: 长度=%d字节，既不是IPv4(%d的倍数)也不是IPv6(%d的倍数)\n",
+				len(peers), PeerV4Len, PeerV6Len)
+			return nil
+		}
 	}
 
-	fmt.Printf("[DEBUG] 解析%d个peer信息\n", num)
+	num := len(peers) / peerLen
+	fmt.Printf("[DEBUG] 解析%d个peer信息 (格式: %s)\n", num, map[bool]string{false: "IPv4", true: "IPv6"}[isIPv6])
 	infos := make([]PeerInfo, 0, num) // 使用0初始容量，仅分配空间
 
 	for i := 0; i < num; i++ {
-		offset := i * PeerLen
-		// 提取IP和端口
-		ip := net.IP(peers[offset : offset+IpLen])
-		port := binary.BigEndian.Uint16(peers[offset+IpLen : offset+PeerLen])
+		offset := i * peerLen
+		var ip net.IP
+		var port uint16
+
+		// 根据IP类型提取IP和端口
+		if isIPv6 {
+			// IPv6格式
+			ip = net.IP(peers[offset : offset+IpV6Len])
+			port = binary.BigEndian.Uint16(peers[offset+IpV6Len : offset+PeerV6Len])
+		} else {
+			// IPv4格式
+			ip = net.IP(peers[offset : offset+IpV4Len])
+			port = binary.BigEndian.Uint16(peers[offset+IpV4Len : offset+PeerV4Len])
+		}
 
 		// 验证IP和端口的有效性
 		if ip.IsUnspecified() || ip.IsLoopback() || port == 0 {
@@ -231,21 +272,45 @@ func tryTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]Peer
 	}
 
 	// 检查peers数据是否为空
-	if len(trackResp.Peers) == 0 {
+	hasIPv4Peers := len(trackResp.Peers) > 0
+	hasIPv6Peers := len(trackResp.Peers6) > 0
+
+	if !hasIPv4Peers && !hasIPv6Peers {
 		fmt.Printf("[WARNING] Tracker未返回任何Peer: %s\n", announceURL)
 		return nil, announceURL
 	}
 
 	// 构建peer信息
-	peers := buildPeerInfo([]byte(trackResp.Peers))
-	if peers != nil {
-		fmt.Printf("[INFO] 从Tracker获取到%d个Peer: %s\n", len(peers), announceURL)
-		if trackResp.Complete > 0 || trackResp.Incomplete > 0 {
-			fmt.Printf("[INFO] 做种数: %d, 下载数: %d\n", trackResp.Complete, trackResp.Incomplete)
+	var allPeers []PeerInfo
+
+	// 处理IPv4 peers
+	if hasIPv4Peers {
+		peersV4 := buildPeerInfo([]byte(trackResp.Peers))
+		if peersV4 != nil && len(peersV4) > 0 {
+			fmt.Printf("[INFO] 从Tracker获取到%d个IPv4 Peer: %s\n", len(peersV4), announceURL)
+			allPeers = append(allPeers, peersV4...)
 		}
 	}
 
-	return peers, announceURL
+	// 处理IPv6 peers
+	if hasIPv6Peers {
+		peersV6 := buildPeerInfo([]byte(trackResp.Peers6))
+		if peersV6 != nil && len(peersV6) > 0 {
+			fmt.Printf("[INFO] 从Tracker获取到%d个IPv6 Peer: %s\n", len(peersV6), announceURL)
+			allPeers = append(allPeers, peersV6...)
+		}
+	}
+
+	// 输出统计信息
+	if len(allPeers) > 0 {
+		fmt.Printf("[INFO] 从Tracker总共获取到%d个Peer: %s\n", len(allPeers), announceURL)
+		if trackResp.Complete > 0 || trackResp.Incomplete > 0 {
+			fmt.Printf("[INFO] 做种数: %d, 下载数: %d\n", trackResp.Complete, trackResp.Incomplete)
+		}
+		return allPeers, announceURL
+	}
+
+	return nil, announceURL
 }
 
 // tryUDPTracker 尝试连接UDP协议的Tracker服务器
@@ -443,7 +508,8 @@ func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]P
 		interval, seeders, leechers)
 
 	// 读取peer列表
-	// 计算预期的peer数量 (每个peer占6字节)
+	// 计算预期的peer数量
+	// 注意：UDP tracker协议中，IPv6 peers通常会在响应中包含一个标识字节
 	expectedPeers := int(seeders + leechers)
 	if expectedPeers > 1000 { // 限制最大peer数量
 		expectedPeers = 1000
@@ -453,8 +519,9 @@ func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]P
 		return nil, announceURL
 	}
 
-	// 分配足够大的缓冲区
-	peersBuf := make([]byte, expectedPeers*6)
+	// 分配足够大的缓冲区 - 使用最大可能的大小 (IPv6)
+	// 每个IPv6 peer占用18字节，为了安全起见，分配更大的缓冲区
+	peersBuf := make([]byte, expectedPeers*PeerV6Len*2) // 分配足够大的缓冲区
 
 	// 尝试读取所有peer数据
 	var peerBytes []byte
@@ -463,9 +530,14 @@ func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]P
 	if err != nil && err != io.EOF {
 		fmt.Printf("[ERROR] 读取UDP announce响应peer列表失败: %s\n", err.Error())
 		// 尝试使用已读取的数据
-		if n > 0 && n%6 == 0 {
-			fmt.Printf("[WARNING] 部分读取成功，尝试使用已读取的%d字节数据\n", n)
-			peerBytes = peersBuf[:n]
+		if n > 0 {
+			// 检查是否可能是有效的peer数据
+			if n%PeerV4Len == 0 || n%PeerV6Len == 0 || (n > 1 && (n-1)%PeerV6Len == 0) {
+				fmt.Printf("[WARNING] 部分读取成功，尝试使用已读取的%d字节数据\n", n)
+				peerBytes = peersBuf[:n]
+			} else {
+				return nil, announceURL
+			}
 		} else {
 			return nil, announceURL
 		}
@@ -473,16 +545,35 @@ func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]P
 		peerBytes = peersBuf[:n]
 	}
 
-	// 检查读取的数据是否为peer列表的倍数
-	if len(peerBytes)%6 != 0 {
-		fmt.Printf("[ERROR] 收到的peer数据长度不是6的倍数: %d字节\n", len(peerBytes))
+	// 检查是否为BEP-32格式的IPv6响应 (第一个字节为0x02)
+	if len(peerBytes) > 0 && peerBytes[0] == 0x02 {
+		fmt.Printf("[DEBUG] 检测到BEP-32格式的IPv6 peers响应\n")
+		// 跳过第一个字节
+		peerBytes = peerBytes[1:]
+	}
+
+	// 检查读取的数据是否为peer列表的有效格式
+	if len(peerBytes)%PeerV4Len != 0 && len(peerBytes)%PeerV6Len != 0 {
+		fmt.Printf("[ERROR] 收到的peer数据长度既不是%d的倍数也不是%d的倍数: %d字节\n",
+			PeerV4Len, PeerV6Len, len(peerBytes))
 		return nil, announceURL
 	}
 
 	// 解析peer列表
 	peers := buildPeerInfo(peerBytes)
 	if peers != nil && len(peers) > 0 {
-		fmt.Printf("[INFO] 从UDP Tracker获取到%d个Peer: %s\n", len(peers), announceURL)
+		// 检查是否包含IPv4和IPv6地址
+		var ipv4Count, ipv6Count int
+		for _, p := range peers {
+			if p.Ip.To4() != nil {
+				ipv4Count++
+			} else if p.Ip.To16() != nil {
+				ipv6Count++
+			}
+		}
+
+		fmt.Printf("[INFO] 从UDP Tracker获取到%d个Peer: %s (IPv4: %d, IPv6: %d)\n",
+			len(peers), announceURL, ipv4Count, ipv6Count)
 	} else {
 		fmt.Printf("[WARNING] 从UDP Tracker获取的Peer列表为空: %s\n", announceURL)
 	}
@@ -492,8 +583,9 @@ func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]P
 
 // FindPeers 从多个tracker服务器获取peer信息
 // 会显示每个tracker服务器提供的peer数量和连接状态
+// 支持IPv4和IPv6两种类型的peer
 func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
-	fmt.Println("开始查找Peers...")
+	fmt.Println("开始查找Peers (支持IPv4和IPv6)...")
 
 	// 获取所有Tracker服务器地址
 	trackers := []string{tf.Announce}
@@ -650,9 +742,19 @@ CollectDone:
 			}
 		}
 
+		// 统计IPv4和IPv6地址数量
+		var ipv4Count, ipv6Count int
+		for _, peer := range allPeers {
+			if peer.Ip.To4() != nil {
+				ipv4Count++
+			} else if peer.Ip.To16() != nil {
+				ipv6Count++
+			}
+		}
+
 		// 打印总结
-		fmt.Printf("\n[总结] 成功连接%d/%d个Tracker，获取到%d个唯一Peer\n",
-			successTrackers, len(trackers), len(allPeers))
+		fmt.Printf("\n[总结] 成功连接%d/%d个Tracker，获取到%d个唯一Peer (IPv4: %d, IPv6: %d)\n",
+			successTrackers, len(trackers), len(allPeers), ipv4Count, ipv6Count)
 
 		if len(allPeers) > 0 {
 			return allPeers

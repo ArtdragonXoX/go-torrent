@@ -66,24 +66,63 @@ func EncodePeers(peers []PeerInfo) []byte {
 }
 
 // DecodePeers 将二进制格式解码为Peer列表
+// 支持两种格式：
+// 1. IPv4格式：每个peer占用6字节，前4字节为IPv4地址，后2字节为端口
+// 2. IPv6格式：每个peer占用18字节，前16字节为IPv6地址，后2字节为端口
 func DecodePeers(data []byte) []PeerInfo {
-	peerLen := 6 // 每个Peer占用6字节
-	peerCount := len(data) / peerLen
-
-	if len(data)%peerLen != 0 {
-		fmt.Println("收到格式不正确的PEX数据")
+	// 检查输入数据
+	if len(data) == 0 {
+		fmt.Println("收到空的PEX数据")
 		return nil
 	}
 
+	// 尝试判断是IPv4还是IPv6格式
+	var isIPv6 bool
+	var peerLen int
+
+	// 检查数据长度是否符合IPv4或IPv6格式
+	if len(data)%PeerV4Len == 0 {
+		isIPv6 = false
+		peerLen = PeerV4Len
+		fmt.Printf("[DEBUG] 检测到IPv4格式的PEX数据\n")
+	} else if len(data)%PeerV6Len == 0 {
+		isIPv6 = true
+		peerLen = PeerV6Len
+		fmt.Printf("[DEBUG] 检测到IPv6格式的PEX数据\n")
+	} else {
+		// 尝试按照BEP-32规范检查是否为混合格式
+		// 如果第一个字节是0x02，表示IPv6格式
+		if len(data) > 0 && data[0] == 0x02 && (len(data)-1)%PeerV6Len == 0 {
+			// 跳过第一个字节
+			data = data[1:]
+			isIPv6 = true
+			peerLen = PeerV6Len
+			fmt.Printf("[DEBUG] 检测到BEP-32格式的IPv6 PEX数据\n")
+		} else {
+			fmt.Printf("收到格式不正确的PEX数据: 长度=%d字节，既不是IPv4(%d的倍数)也不是IPv6(%d的倍数)\n",
+				len(data), PeerV4Len, PeerV6Len)
+			return nil
+		}
+	}
+
+	peerCount := len(data) / peerLen
 	peers := make([]PeerInfo, 0, peerCount)
+
 	for i := 0; i < peerCount; i++ {
 		offset := i * peerLen
+		var ip net.IP
+		var port uint16
 
-		// 提取IP地址（4字节）
-		ip := net.IP(data[offset : offset+4])
-
-		// 提取端口（2字节）
-		port := binary.BigEndian.Uint16(data[offset+4 : offset+6])
+		// 根据IP类型提取IP和端口
+		if isIPv6 {
+			// IPv6格式
+			ip = net.IP(data[offset : offset+IpV6Len])
+			port = binary.BigEndian.Uint16(data[offset+IpV6Len : offset+PeerV6Len])
+		} else {
+			// IPv4格式
+			ip = net.IP(data[offset : offset+IpV4Len])
+			port = binary.BigEndian.Uint16(data[offset+IpV4Len : offset+PeerV4Len])
+		}
 
 		// 创建PeerInfo并添加到列表
 		peers = append(peers, PeerInfo{
