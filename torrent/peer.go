@@ -22,6 +22,8 @@ const (
 	MsgRequest     MsgId = 6
 	MsgPiece       MsgId = 7
 	MsgCancel      MsgId = 8
+	MsgDHTNodes    MsgId = 9  // 用于交换DHT节点的消息类型
+	MsgPEX         MsgId = 10 // 用于交换Peer列表的消息类型
 )
 
 type PeerMsg struct {
@@ -35,6 +37,62 @@ func NewDHTNodesMsg(nodesData []byte) *PeerMsg {
 		Id:      MsgDHTNodes,
 		Payload: nodesData,
 	}
+}
+
+// NewPEXMsg 创建一个用于交换Peer列表的消息
+func NewPEXMsg(peersData []byte) *PeerMsg {
+	return &PeerMsg{
+		Id:      MsgPEX,
+		Payload: peersData,
+	}
+}
+
+// EncodePeers 将Peer列表编码为二进制格式
+// 每个Peer占用6字节：4字节IP地址 + 2字节端口
+func EncodePeers(peers []PeerInfo) []byte {
+	if len(peers) == 0 {
+		return nil
+	}
+
+	buf := make([]byte, len(peers)*6)
+	for i, peer := range peers {
+		offset := i * 6
+		// 复制IP地址（4字节）
+		copy(buf[offset:offset+4], peer.Ip.To4())
+		// 复制端口（2字节）
+		binary.BigEndian.PutUint16(buf[offset+4:offset+6], peer.Port)
+	}
+	return buf
+}
+
+// DecodePeers 将二进制格式解码为Peer列表
+func DecodePeers(data []byte) []PeerInfo {
+	peerLen := 6 // 每个Peer占用6字节
+	peerCount := len(data) / peerLen
+
+	if len(data)%peerLen != 0 {
+		fmt.Println("收到格式不正确的PEX数据")
+		return nil
+	}
+
+	peers := make([]PeerInfo, 0, peerCount)
+	for i := 0; i < peerCount; i++ {
+		offset := i * peerLen
+
+		// 提取IP地址（4字节）
+		ip := net.IP(data[offset : offset+4])
+
+		// 提取端口（2字节）
+		port := binary.BigEndian.Uint16(data[offset+4 : offset+6])
+
+		// 创建PeerInfo并添加到列表
+		peers = append(peers, PeerInfo{
+			Ip:       ip,
+			Port:     port,
+			LastSeen: time.Now(),
+		})
+	}
+	return peers
 }
 
 type PeerConn struct {
@@ -114,15 +172,13 @@ func (c *PeerConn) ReadMsg() (*PeerMsg, error) {
 		Payload: msgBuf[1:],
 	}
 
-	// 如果是DHT节点消息，并且任务和DHT网络可用，直接处理
-	if msg.Id == MsgDHTNodes && c.task != nil && c.task.DHT != nil {
-		// 在这里不直接处理，让上层调用者处理
-		// 因为这里可能在不同的goroutine中执行
+	peerKey := fmt.Sprintf("%s:%d", c.peer.Ip.String(), c.peer.Port)
 
+	// 处理DHT节点消息
+	if msg.Id == MsgDHTNodes && c.task != nil && c.task.DHT != nil {
 		// 如果是空的DHT节点请求（payload为空），则自动回复我们的DHT节点
 		if len(msg.Payload) == 0 {
 			// 这是一个DHT节点请求，自动回复我们的DHT节点
-			peerKey := fmt.Sprintf("%s:%d", c.peer.Ip.String(), c.peer.Port)
 			fmt.Printf("收到来自Peer %s 的DHT节点请求，准备回复\n", peerKey)
 
 			// 编码本地DHT节点并发送给peer
@@ -135,6 +191,50 @@ func (c *PeerConn) ReadMsg() (*PeerMsg, error) {
 				} else {
 					fmt.Printf("向Peer %s 回复了DHT节点信息\n", peerKey)
 				}
+			}
+		}
+	}
+
+	// 处理PEX消息
+	if msg.Id == MsgPEX && c.task != nil {
+		// 如果是空的PEX请求（payload为空），则自动回复我们的Peer列表
+		if len(msg.Payload) == 0 {
+			fmt.Printf("收到来自Peer %s 的PEX请求，准备回复\n", peerKey)
+
+			// 获取当前已知的Peer列表（排除当前连接的Peer）
+			c.task.peerMu.RLock()
+			var peersToShare []PeerInfo
+			for _, p := range c.task.PeerList {
+				// 不分享当前连接的Peer自身
+				if p.Ip.String() != c.peer.Ip.String() || p.Port != c.peer.Port {
+					peersToShare = append(peersToShare, p)
+				}
+			}
+			c.task.peerMu.RUnlock()
+
+			// 限制分享的Peer数量，避免消息过大
+			if len(peersToShare) > 50 {
+				peersToShare = peersToShare[:50]
+			}
+
+			// 编码Peer列表并发送
+			peersData := EncodePeers(peersToShare)
+			if len(peersData) > 0 {
+				pexMsg := NewPEXMsg(peersData)
+				_, err := c.WriteMsg(pexMsg)
+				if err != nil {
+					fmt.Printf("向Peer %s 回复PEX信息失败: %v\n", peerKey, err)
+				} else {
+					fmt.Printf("向Peer %s 回复了PEX信息，分享了%d个Peer\n", peerKey, len(peersToShare))
+				}
+			}
+		} else {
+			// 处理收到的PEX数据
+			peers := DecodePeers(msg.Payload)
+			if len(peers) > 0 {
+				fmt.Printf("从Peer %s 收到PEX数据，包含%d个Peer\n", peerKey, len(peers))
+				// 添加到任务的Peer列表
+				c.task.addPeers(peers)
 			}
 		}
 	}

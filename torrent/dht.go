@@ -18,8 +18,8 @@ const (
 	MaxPacketSize  = 8192
 	DefaultDhtPort = 6881
 
-	// DHT消息类型
-	MsgDHTNodes = 9 // 用于交换DHT节点的消息类型
+	// DHT相关常量
+	// 注意：MsgDHTNodes已在peer.go中定义
 )
 
 type NodeID [KeySize]byte

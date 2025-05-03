@@ -127,6 +127,9 @@ func (state *taskState) handleMsg() error {
 	case MsgDHTNodes:
 		// 使用专门的函数处理DHT节点交换消息
 		handleDHTNodesMsg(state.conn, msg)
+	case MsgPEX:
+		// 使用专门的函数处理PEX消息
+		handlePEXMsg(state.conn, msg)
 	}
 	return nil
 }
@@ -161,6 +164,58 @@ func handleDHTNodesMsg(conn *PeerConn, msg *PeerMsg) {
 					fmt.Printf("向Peer %s 回复DHT节点信息失败: %v\n", peerKey, err)
 				} else {
 					fmt.Printf("向Peer %s 回复了DHT节点信息（互换）\n", peerKey)
+				}
+			}
+		}
+	}
+}
+
+// 处理接收到的PEX消息
+func handlePEXMsg(conn *PeerConn, msg *PeerMsg) {
+	// 如果是空消息，可能是PEX请求，已在ReadMsg中处理
+	if conn.task == nil || len(msg.Payload) == 0 {
+		return
+	}
+
+	// 解码接收到的Peer列表
+	peers := DecodePeers(msg.Payload)
+	if len(peers) > 0 {
+		// 将这些Peer添加到任务的Peer列表
+		conn.task.addPeers(peers)
+		peerKey := fmt.Sprintf("%s:%d", conn.peer.Ip.String(), conn.peer.Port)
+		fmt.Printf("从Peer %s 接收到%d个Peer信息\n", peerKey, len(peers))
+
+		// 如果我们的Peer列表数量较多，可以回复我们的Peer列表
+		conn.task.peerMu.RLock()
+		peerCount := len(conn.task.PeerList)
+		conn.task.peerMu.RUnlock()
+
+		if peerCount > 10 { // 如果我们有足够多的Peer，回复我们的Peer列表
+			// 获取当前已知的Peer列表（排除当前连接的Peer）
+			conn.task.peerMu.RLock()
+			var peersToShare []PeerInfo
+			for _, p := range conn.task.PeerList {
+				// 不分享当前连接的Peer自身
+				if p.Ip.String() != conn.peer.Ip.String() || p.Port != conn.peer.Port {
+					peersToShare = append(peersToShare, p)
+				}
+			}
+			conn.task.peerMu.RUnlock()
+
+			// 限制分享的Peer数量，避免消息过大
+			if len(peersToShare) > 50 {
+				peersToShare = peersToShare[:50]
+			}
+
+			// 编码Peer列表并发送
+			peersData := EncodePeers(peersToShare)
+			if len(peersData) > 0 {
+				pexMsg := NewPEXMsg(peersData)
+				_, err := conn.WriteMsg(pexMsg)
+				if err != nil {
+					fmt.Printf("向Peer %s 回复PEX信息失败: %v\n", peerKey, err)
+				} else {
+					fmt.Printf("向Peer %s 回复了PEX信息，分享了%d个Peer\n", peerKey, len(peersToShare))
 				}
 			}
 		}
@@ -258,30 +313,80 @@ func (t *TorrentTask) peerRoutine(peer PeerInfo, taskQueue chan *pieceTask, resu
 		}
 	}
 
+	// 发送PEX请求，请求对方的Peer列表
+	pexMsg := NewPEXMsg(nil) // 空payload表示请求
+	_, err = conn.WriteMsg(pexMsg)
+	if err != nil {
+		fmt.Printf("向Peer %s 发送PEX请求失败: %v\n", peerKey, err)
+	} else {
+		fmt.Printf("向Peer %s 发送了PEX请求\n", peerKey)
+	}
+
 	failureCount := 0 // 当前会话中的连续失败次数
 
-	// 创建一个goroutine来处理来自peer的消息
+	// 创建一个定时器，定期交换PEX信息
+	pexTicker := time.NewTicker(15 * time.Second)
+	defer pexTicker.Stop()
+
+	// 创建一个goroutine来处理来自peer的消息和定期交换PEX
 	go func() {
 		for {
-			// 设置较短的超时时间，以便能够及时处理其他消息
-			conn.SetDeadline(time.Now().Add(1 * time.Second))
-			msg, err := conn.ReadMsg()
-			if err != nil {
-				// 忽略超时错误
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			select {
+			case <-pexTicker.C:
+				// 定期发送PEX消息，分享我们的Peer列表
+				t.peerMu.RLock()
+				var peersToShare []PeerInfo
+				for _, p := range t.PeerList {
+					// 不分享当前连接的Peer自身
+					if p.Ip.String() != peer.Ip.String() || p.Port != peer.Port {
+						peersToShare = append(peersToShare, p)
+					}
+				}
+				t.peerMu.RUnlock()
+
+				// 限制分享的Peer数量，避免消息过大
+				if len(peersToShare) > 50 {
+					peersToShare = peersToShare[:50]
+				}
+
+				// 编码Peer列表并发送
+				peersData := EncodePeers(peersToShare)
+				if len(peersData) > 0 {
+					pexMsg := NewPEXMsg(peersData)
+					_, err := conn.WriteMsg(pexMsg)
+					if err != nil {
+						fmt.Printf("向Peer %s 定期发送PEX信息失败: %v\n", peerKey, err)
+					} else {
+						fmt.Printf("向Peer %s 定期发送了PEX信息，分享了%d个Peer\n", peerKey, len(peersToShare))
+					}
+				}
+
+			default:
+				// 设置较短的超时时间，以便能够及时处理其他消息
+				conn.SetDeadline(time.Now().Add(1 * time.Second))
+				msg, err := conn.ReadMsg()
+				if err != nil {
+					// 忽略超时错误
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						continue
+					}
+					// 其他错误则退出
+					return
+				}
+
+				if msg == nil {
 					continue
 				}
-				// 其他错误则退出
-				break
-			}
 
-			if msg == nil {
-				continue
-			}
+				// 处理DHT节点消息
+				if msg.Id == MsgDHTNodes {
+					handleDHTNodesMsg(conn, msg)
+				}
 
-			// 处理DHT节点消息
-			if msg.Id == MsgDHTNodes {
-				handleDHTNodesMsg(conn, msg)
+				// 处理PEX消息
+				if msg.Id == MsgPEX {
+					handlePEXMsg(conn, msg)
+				}
 			}
 		}
 	}()
@@ -482,6 +587,41 @@ func (t *TorrentTask) requestDHTNodesFromPeers() {
 	}
 }
 
+// requestPEXFromPeers 向所有活跃的peer请求PEX信息
+func (t *TorrentTask) requestPEXFromPeers() {
+	// 获取所有活跃的peer连接
+	activePeers := getActivePeers()
+	if len(activePeers) == 0 {
+		fmt.Println("没有活跃的peer连接，无法请求PEX信息")
+		return
+	}
+
+	fmt.Printf("开始向%d个活跃peer请求PEX信息\n", len(activePeers))
+
+	// 创建一个空的PEX请求消息
+	// 这是一个特殊的消息，告诉peer我们需要PEX信息
+	pexRequestMsg := NewPEXMsg(nil)
+
+	// 向所有活跃的peer发送请求
+	for _, peer := range activePeers {
+		if peer.conn != nil {
+			// 设置较短的超时时间
+			peer.conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+			// 发送PEX请求
+			_, err := peer.conn.WriteMsg(pexRequestMsg)
+			if err != nil {
+				fmt.Printf("向Peer %s 请求PEX信息失败: %v\n", peer.peerKey, err)
+			} else {
+				fmt.Printf("向Peer %s 发送了PEX请求\n", peer.peerKey)
+			}
+
+			// 重置超时时间
+			peer.conn.SetDeadline(time.Time{})
+		}
+	}
+}
+
 // Download 下载种子文件，如果所有peer都不可用则终止任务并返回错误
 func Download(task *TorrentTask) error {
 	var err error
@@ -520,10 +660,12 @@ func Download(task *TorrentTask) error {
 	if task.DHT != nil {
 		go task.startDHTQuery()
 
-		// 启动一个额外的goroutine，定期检查是否有新的DHT节点从peer获取
+		// 启动一个额外的goroutine，定期检查是否有新的DHT节点和Peer从已连接的peer获取
 		go func() {
 			dhtNodesTicker := time.NewTicker(30 * time.Second)
+			pexTicker := time.NewTicker(60 * time.Second) // PEX请求间隔时间更长一些
 			defer dhtNodesTicker.Stop()
+			defer pexTicker.Stop()
 
 			for {
 				select {
@@ -541,6 +683,18 @@ func Download(task *TorrentTask) error {
 						// 请求DHT节点
 						task.requestDHTNodesFromPeers()
 					}
+
+				case <-pexTicker.C:
+					// 检查当前Peer列表数量
+					task.peerMu.RLock()
+					peerCount := len(task.PeerList)
+					task.peerMu.RUnlock()
+
+					fmt.Printf("当前已知的Peer数量: %d\n", peerCount)
+
+					// 定期向所有已连接的peer请求PEX信息，以获取更多的peer
+					fmt.Println("定期请求PEX信息，尝试发现更多Peer")
+					task.requestPEXFromPeers()
 				}
 			}
 		}()
