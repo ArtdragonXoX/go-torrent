@@ -156,9 +156,14 @@ func buildPeerInfo(peers []byte) []PeerInfo {
 		}
 
 		// 验证IP和端口的有效性
-		if ip.IsUnspecified() || ip.IsLoopback() || port == 0 {
+		if ip == nil || port == 0 {
 			// 跳过无效的IP或端口
+			fmt.Printf("[DEBUG] 跳过无效peer: IP=%v, Port=%d\n", ip, port)
 			continue
+		}
+		if ip.IsUnspecified() || ip.IsLoopback() {
+			// 记录但不过滤这些IP
+			fmt.Printf("[DEBUG] 检测到特殊IP地址: %v (端口: %d)\n", ip, port)
 		}
 
 		// 添加有效的peer信息
@@ -302,15 +307,16 @@ func tryTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]Peer
 	}
 
 	// 输出统计信息
-	if len(allPeers) > 0 {
-		fmt.Printf("[INFO] 从Tracker总共获取到%d个Peer: %s\n", len(allPeers), announceURL)
-		if trackResp.Complete > 0 || trackResp.Incomplete > 0 {
-			fmt.Printf("[INFO] 做种数: %d, 下载数: %d\n", trackResp.Complete, trackResp.Incomplete)
-		}
-		return allPeers, announceURL
+	if len(allPeers) == 0 {
+		fmt.Printf("[ERROR] 从Tracker未获取到任何有效Peer: %s\n", announceURL)
+		return nil, announceURL
 	}
 
-	return nil, announceURL
+	fmt.Printf("[INFO] 从Tracker总共获取到%d个Peer: %s\n", len(allPeers), announceURL)
+	if trackResp.Complete > 0 || trackResp.Incomplete > 0 {
+		fmt.Printf("[INFO] 做种数: %d, 下载数: %d\n", trackResp.Complete, trackResp.Incomplete)
+	}
+	return allPeers, announceURL
 }
 
 // tryUDPTracker 尝试连接UDP协议的Tracker服务器
@@ -574,6 +580,7 @@ func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]P
 
 		fmt.Printf("[INFO] 从UDP Tracker获取到%d个Peer: %s (IPv4: %d, IPv6: %d)\n",
 			len(peers), announceURL, ipv4Count, ipv6Count)
+		fmt.Printf("[DEBUG] 原始peer数据长度: %d字节, 解析出%d个peer\n", len(peerBytes), len(peers))
 	} else {
 		fmt.Printf("[WARNING] 从UDP Tracker获取的Peer列表为空: %s\n", announceURL)
 	}
