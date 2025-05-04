@@ -45,18 +45,15 @@ func handshake(conn net.Conn, infoSHA [SHALEN]byte, peerId [IDLEN]byte) error {
 	req := NewHandShakeMsg(infoSHA, peerId)
 	_, err := WriteHandShake(conn, req)
 	if err != nil {
-		fmt.Println("send handshake failed")
 		return err
 	}
 	// read HandshakeMsg
 	res, err := ReadHandshake(conn)
 	if err != nil {
-		fmt.Println("read handshake failed")
 		return err
 	}
 	// check HandshakeMsg
 	if !bytes.Equal(res.InfoSHA[:], infoSHA[:]) {
-		fmt.Println("check handshake failed")
 		return fmt.Errorf("handshake msg error: " + string(res.InfoSHA[:]))
 	}
 	return nil
@@ -167,13 +164,13 @@ func NewConn(peer PeerInfo, infoSHA [SHALEN]byte, peerId [IDLEN]byte) (*PeerConn
 	addr := net.JoinHostPort(peer.Ip.String(), strconv.Itoa(int(peer.Port)))
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
-		fmt.Println("set tcp conn failed: " + addr)
+		fmt.Println("tcp连接失败: " + addr)
 		return nil, err
 	}
 	// torrent p2p handshake
 	err = handshake(conn, infoSHA, peerId)
 	if err != nil {
-		fmt.Println("handshake failed")
+		fmt.Println("BitTorrent握手失败: " + addr)
 		conn.Close()
 		return nil, err
 	}
@@ -187,7 +184,6 @@ func NewConn(peer PeerInfo, infoSHA [SHALEN]byte, peerId [IDLEN]byte) (*PeerConn
 	// fill bitfield
 	err = fillBitfield(c)
 	if err != nil {
-		fmt.Println("fill bitfield failed, " + err.Error())
 		return nil, err
 	}
 	return c, nil

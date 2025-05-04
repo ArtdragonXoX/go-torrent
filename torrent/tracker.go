@@ -505,7 +505,7 @@ func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
 			for _, peer := range peers {
 				key := peer.Ip.String() + ":" + strconv.Itoa(int(peer.Port))
 				if _, exists := peerSet[key]; !exists {
-					fmt.Println("成功连接到Peer:", peer.Ip, "端口:", peer.Port)
+					fmt.Println("成功从", trackers[i], "连接到Peer:", peer.Ip, "端口:", peer.Port)
 					peerSet[key] = peer
 					allPeers = append(allPeers, peer)
 				}
