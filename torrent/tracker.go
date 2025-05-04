@@ -96,9 +96,10 @@ func buildUrl(tf *TorrentFile, peerId [IDLEN]byte) (string, error) {
 }
 
 // buildPeerInfo 解析二进制格式的peer信息列表
-// 支持两种格式：
+// 支持三种格式：
 // 1. IPv4格式：每个peer占用6字节，前4字节为IPv4地址，后2字节为端口
 // 2. IPv6格式：每个peer占用18字节，前16字节为IPv6地址，后2字节为端口
+// 3. 混合格式：同时包含IPv4和IPv6格式的peer数据
 // 返回解析后的PeerInfo结构体切片
 func buildPeerInfo(peers []byte) []PeerInfo {
 	// 检查输入数据
@@ -107,75 +108,194 @@ func buildPeerInfo(peers []byte) []PeerInfo {
 		return nil
 	}
 
-	// 尝试判断是IPv4还是IPv6格式
-	var isIPv6 bool
-	var peerLen int
+	// 尝试判断数据格式
+	var infos []PeerInfo
 
-	// 检查数据长度是否符合IPv4或IPv6格式
+	// 首先检查是否为BEP-32格式的IPv6数据（以0x02开头）
+	if len(peers) > 0 && peers[0] == 0x02 && (len(peers)-1)%PeerV6Len == 0 {
+		// 跳过第一个字节，处理纯IPv6数据
+		fmt.Printf("[DEBUG] 检测到BEP-32格式的IPv6 peers数据\n")
+		infos = parseIPv6Peers(peers[1:])
+		return infos
+	}
+
+	// 检查是否为纯IPv4或纯IPv6格式
 	if len(peers)%PeerV4Len == 0 {
-		isIPv6 = false
-		peerLen = PeerV4Len
-		fmt.Printf("[DEBUG] 检测到IPv4格式的peers数据\n")
+		// 可能是纯IPv4格式
+		fmt.Printf("[DEBUG] 检测到可能是IPv4格式的peers数据\n")
+		infos = parseIPv4Peers(peers)
 	} else if len(peers)%PeerV6Len == 0 {
-		isIPv6 = true
-		peerLen = PeerV6Len
-		fmt.Printf("[DEBUG] 检测到IPv6格式的peers数据\n")
+		// 可能是纯IPv6格式
+		fmt.Printf("[DEBUG] 检测到可能是IPv6格式的peers数据\n")
+		infos = parseIPv6Peers(peers)
 	} else {
-		// 尝试按照BEP-32规范检查是否为混合格式
-		// 如果第一个字节是0x02，表示IPv6格式
-		if len(peers) > 0 && peers[0] == 0x02 && (len(peers)-1)%PeerV6Len == 0 {
-			// 跳过第一个字节
-			peers = peers[1:]
-			isIPv6 = true
-			peerLen = PeerV6Len
-			fmt.Printf("[DEBUG] 检测到BEP-32格式的IPv6 peers数据\n")
+		// 尝试解析为混合格式
+		fmt.Printf("[DEBUG] 尝试解析混合格式的peers数据 (长度=%d字节)\n", len(peers))
+
+		// 先尝试提取IPv4部分（假设在前面）
+		var ipv4Data, ipv6Data []byte
+
+		// 计算可能的IPv4数据长度（必须是PeerV4Len的倍数）
+		ipv4Len := (len(peers) / PeerV4Len) * PeerV4Len
+
+		// 检查剩余数据是否符合IPv6格式
+		if (len(peers)-ipv4Len)%PeerV6Len == 0 && ipv4Len > 0 {
+			// 可能是先IPv4后IPv6的混合格式
+			ipv4Data = peers[:ipv4Len]
+			ipv6Data = peers[ipv4Len:]
+
+			fmt.Printf("[DEBUG] 检测到混合格式: IPv4数据(%d字节) + IPv6数据(%d字节)\n",
+				len(ipv4Data), len(ipv6Data))
+
+			// 解析IPv4部分
+			if len(ipv4Data) > 0 {
+				ipv4Peers := parseIPv4Peers(ipv4Data)
+				infos = append(infos, ipv4Peers...)
+			}
+
+			// 解析IPv6部分
+			if len(ipv6Data) > 0 {
+				ipv6Peers := parseIPv6Peers(ipv6Data)
+				infos = append(infos, ipv6Peers...)
+			}
 		} else {
-			fmt.Printf("[ERROR] 收到格式不正确的peers数据: 长度=%d字节，既不是IPv4(%d的倍数)也不是IPv6(%d的倍数)\n",
-				len(peers), PeerV4Len, PeerV6Len)
-			return nil
+			// 尝试其他可能的分割点
+			found := false
+
+			// 从后向前尝试不同的分割点
+			for i := len(peers); i >= PeerV6Len; i -= PeerV6Len {
+				if i%PeerV4Len == 0 {
+					// 找到一个可能的分割点
+					ipv4Data = peers[:i]
+					ipv6Data = peers[i:]
+
+					if len(ipv4Data)%PeerV4Len == 0 && len(ipv6Data)%PeerV6Len == 0 {
+						fmt.Printf("[DEBUG] 尝试分割点: IPv4数据(%d字节) + IPv6数据(%d字节)\n",
+							len(ipv4Data), len(ipv6Data))
+
+						// 解析IPv4部分
+						if len(ipv4Data) > 0 {
+							ipv4Peers := parseIPv4Peers(ipv4Data)
+							infos = append(infos, ipv4Peers...)
+						}
+
+						// 解析IPv6部分
+						if len(ipv6Data) > 0 {
+							ipv6Peers := parseIPv6Peers(ipv6Data)
+							infos = append(infos, ipv6Peers...)
+						}
+
+						found = true
+						break
+					}
+				}
+			}
+
+			if !found {
+				fmt.Printf("[ERROR] 无法解析混合格式的peers数据: 长度=%d字节，既不是IPv4(%d的倍数)也不是IPv6(%d的倍数)\n",
+					len(peers), PeerV4Len, PeerV6Len)
+				return nil
+			}
 		}
 	}
 
-	num := len(peers) / peerLen
-	fmt.Printf("[DEBUG] 解析%d个peer信息 (格式: %s)\n", num, map[bool]string{false: "IPv4", true: "IPv6"}[isIPv6])
-	infos := make([]PeerInfo, 0, num) // 使用0初始容量，仅分配空间
+	// 输出解析结果统计
+	if len(infos) > 0 {
+		// 统计IPv4和IPv6地址数量
+		var ipv4Count, ipv6Count int
+		for _, p := range infos {
+			if p.Ip.To4() != nil {
+				ipv4Count++
+			} else if p.Ip.To16() != nil {
+				ipv6Count++
+			}
+		}
+		fmt.Printf("[DEBUG] 成功解析%d个有效peer (IPv4: %d, IPv6: %d)\n",
+			len(infos), ipv4Count, ipv6Count)
+	} else {
+		fmt.Printf("[WARNING] 未能解析出任何有效peer\n")
+	}
+
+	return infos
+}
+
+// parseIPv4Peers 解析IPv4格式的peer数据
+// 每个peer占用6字节：4字节IPv4地址 + 2字节端口
+func parseIPv4Peers(data []byte) []PeerInfo {
+	if len(data) == 0 || len(data)%PeerV4Len != 0 {
+		return nil
+	}
+
+	num := len(data) / PeerV4Len
+	fmt.Printf("[DEBUG] 解析%d个IPv4 peer信息\n", num)
+	infos := make([]PeerInfo, 0, num)
 
 	for i := 0; i < num; i++ {
-		offset := i * peerLen
-		var ip net.IP
-		var port uint16
+		offset := i * PeerV4Len
 
-		// 根据IP类型提取IP和端口
-		if isIPv6 {
-			// IPv6格式
-			ip = net.IP(peers[offset : offset+IpV6Len])
-			port = binary.BigEndian.Uint16(peers[offset+IpV6Len : offset+PeerV6Len])
-		} else {
-			// IPv4格式
-			ip = net.IP(peers[offset : offset+IpV4Len])
-			port = binary.BigEndian.Uint16(peers[offset+IpV4Len : offset+PeerV4Len])
-		}
+		// 提取IPv4地址和端口
+		ip := net.IP(data[offset : offset+IpV4Len])
+		port := binary.BigEndian.Uint16(data[offset+IpV4Len : offset+PeerV4Len])
 
 		// 验证IP和端口的有效性
 		if ip == nil || port == 0 {
-			// 跳过无效的IP或端口
-			fmt.Printf("[DEBUG] 跳过无效peer: IP=%v, Port=%d\n", ip, port)
 			continue
 		}
-		if ip.IsUnspecified() || ip.IsLoopback() {
-			// 记录但不过滤这些IP
-			fmt.Printf("[DEBUG] 检测到特殊IP地址: %v (端口: %d)\n", ip, port)
+
+		// 确保是IPv4地址
+		ipv4 := ip.To4()
+		if ipv4 == nil {
+			continue
 		}
 
 		// 添加有效的peer信息
 		infos = append(infos, PeerInfo{
-			Ip:       ip,
+			Ip:       ipv4,
 			Port:     port,
 			LastSeen: time.Now(),
 		})
 	}
 
-	fmt.Printf("[DEBUG] 成功解析%d个有效peer (过滤掉%d个无效peer)\n", len(infos), num-len(infos))
+	return infos
+}
+
+// parseIPv6Peers 解析IPv6格式的peer数据
+// 每个peer占用18字节：16字节IPv6地址 + 2字节端口
+func parseIPv6Peers(data []byte) []PeerInfo {
+	if len(data) == 0 || len(data)%PeerV6Len != 0 {
+		return nil
+	}
+
+	num := len(data) / PeerV6Len
+	fmt.Printf("[DEBUG] 解析%d个IPv6 peer信息\n", num)
+	infos := make([]PeerInfo, 0, num)
+
+	for i := 0; i < num; i++ {
+		offset := i * PeerV6Len
+
+		// 提取IPv6地址和端口
+		ip := net.IP(data[offset : offset+IpV6Len])
+		port := binary.BigEndian.Uint16(data[offset+IpV6Len : offset+PeerV6Len])
+
+		// 验证IP和端口的有效性
+		if ip == nil || port == 0 {
+			continue
+		}
+
+		// 确保是IPv6地址
+		ipv6 := ip.To16()
+		if ipv6 == nil || ip.To4() != nil { // 排除IPv4映射的IPv6地址
+			continue
+		}
+
+		// 添加有效的peer信息
+		infos = append(infos, PeerInfo{
+			Ip:       ipv6,
+			Port:     port,
+			LastSeen: time.Now(),
+		})
+	}
+
 	return infos
 }
 
@@ -642,6 +762,13 @@ func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]P
 }
 
 // 记录tracker响应日志
+// logTrackerResponse 记录Tracker响应日志
+// 参数:
+//
+//	t: TorrentTask实例
+//	peerKey: 对等节点标识
+//	msgType: 消息类型(HTTP_RESPONSE/UDP_REQUEST等)
+//	data: 要记录的原始数据或解析后的TrackerResp结构体
 func logTrackerResponse(t *TorrentTask, peerKey string, msgType string, data string) {
 	if t == nil || !t.EnableLog {
 		return
@@ -662,8 +789,43 @@ func logTrackerResponse(t *TorrentTask, peerKey string, msgType string, data str
 		fmt.Printf("[INFO] 已创建Tracker响应日志文件: %s\n", logPath)
 	}
 
+	// 如果是Tracker响应数据，尝试解析为TrackerResp结构体
+	var logData string
+	if msgType == "HTTP_RESPONSE" || msgType == "UDP_RESPONSE" {
+		trackResp := new(TrackerResp)
+		err := bencode.Unmarshal(bytes.NewReader([]byte(data)), trackResp)
+		if err == nil {
+			logData = fmt.Sprintf("解析结果: Interval=%d, Complete=%d, Incomplete=%d, Peers=%d, Peers6=%d",
+				trackResp.Interval, trackResp.Complete, trackResp.Incomplete,
+				len(trackResp.Peers)/6, len(trackResp.Peers6)/18)
+			// 添加PeerInfo详细信息
+			if len(trackResp.Peers) > 0 {
+				peers := buildPeerInfo([]byte(trackResp.Peers))
+				for i, peer := range peers {
+					logData += fmt.Sprintf("\nPeer %d: IP=%s, Port=%d", i+1, peer.Ip, peer.Port)
+				}
+			}
+			if len(trackResp.Peers6) > 0 {
+				peers6 := buildPeerInfo([]byte(trackResp.Peers6))
+				for i, peer := range peers6 {
+					logData += fmt.Sprintf("\nPeer6 %d: IP=%s, Port=%d", i+1, peer.Ip, peer.Port)
+				}
+			}
+			if trackResp.FailureReason != "" {
+				logData += fmt.Sprintf(", FailureReason=%s", trackResp.FailureReason)
+			}
+			if trackResp.WarningMessage != "" {
+				logData += fmt.Sprintf(", WarningMessage=%s", trackResp.WarningMessage)
+			}
+		} else {
+			logData = data
+		}
+	} else {
+		logData = data
+	}
+
 	logEntry := fmt.Sprintf("[%s] %s %s: %s\n",
-		time.Now().Format(time.RFC3339), peerKey, msgType, data)
+		time.Now().Format(time.RFC3339), peerKey, msgType, logData)
 	if _, err := t.logFile.WriteString(logEntry); err != nil {
 		fmt.Printf("写入日志失败: %v\n", err)
 	}
