@@ -641,9 +641,6 @@ func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]P
 	return peers, announceURL
 }
 
-// FindPeers 从多个tracker服务器获取peer信息
-// 会显示每个tracker服务器提供的peer数量和连接状态
-// 支持IPv4和IPv6两种类型的peer
 // 记录tracker响应日志
 func logTrackerResponse(t *TorrentTask, peerKey string, msgType string, data string) {
 	if t == nil || !t.EnableLog {
@@ -672,6 +669,9 @@ func logTrackerResponse(t *TorrentTask, peerKey string, msgType string, data str
 	}
 }
 
+// FindPeers 从多个tracker服务器获取peer信息
+// 会显示每个tracker服务器提供的peer数量和连接状态
+// 支持IPv4和IPv6两种类型的peer
 func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
 	// 创建一个空的TorrentTask用于日志记录
 	// 在main.go中会设置EnableLog字段
