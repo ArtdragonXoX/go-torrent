@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,20 +20,17 @@ import (
 )
 
 const (
-	PeerPort  int = 6666
-	IpV4Len   int = 4
-	IpV6Len   int = 16
-	PortLen   int = 2
-	PeerV4Len int = IpV4Len + PortLen
-	PeerV6Len int = IpV6Len + PortLen
+	PeerPort int = 6666
+	IpLen    int = 4
+	PortLen  int = 2
+	PeerLen  int = IpLen + PortLen
 )
 
 const IDLEN int = 20
 
 type PeerInfo struct {
-	Ip       net.IP
-	Port     uint16
-	LastSeen time.Time
+	Ip   net.IP
+	Port uint16
 }
 
 type TrackerResp struct {
@@ -465,47 +461,16 @@ func readBackupTrackers(filePath string) []string {
  * @return []PeerInfo - 获取到的Peer列表
  */
 func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
-	// 创建一个空的TorrentTask用于日志记录
-	// 在main.go中会设置EnableLog字段
-	task := &TorrentTask{
-		FileName: tf.FileName,
-	}
-
-	// 检查命令行参数中是否有-log选项
-	for _, arg := range os.Args {
-		if arg == "-log" {
-			task.EnableLog = true
-			break
-		}
-	}
-	fmt.Println("开始查找Peers (支持IPv4和IPv6)...")
-
 	// 获取所有Tracker服务器地址
 	trackers := []string{tf.Announce}
 	backupTrackers := readBackupTrackers(".\\tracker.txt")
 	if backupTrackers != nil {
-		fmt.Printf("[INFO] 从tracker.txt加载了%d个备用Tracker\n", len(backupTrackers))
 		trackers = append(trackers, backupTrackers...)
-	} else {
-		fmt.Println("[WARNING] 未能加载备用Tracker列表，仅使用种子文件中的Tracker")
 	}
 
-	fmt.Printf("[INFO] 共有%d个Tracker服务器待连接\n", len(trackers))
-
-	// 创建channel用于接收结果，设置足够大的缓冲区避免goroutine阻塞
-	type trackerResult struct {
-		peers      []PeerInfo
-		trackerURL string
-		success    bool
-		errorMsg   string
-	}
-	resultChan := make(chan trackerResult, len(trackers))
+	// 创建channel用于接收结果
+	peerChan := make(chan []PeerInfo, len(trackers))
 	var allPeers []PeerInfo
-
-	// 设置超时控制
-	timeout := 60 * time.Second // 总体超时时间
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 
 	// 并发请求所有Tracker服务器
 	for _, tracker := range trackers {
@@ -548,11 +513,11 @@ func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
 		}
 	}
 
-		if len(allPeers) > 0 {
-			return allPeers
-		}
+	if len(allPeers) > 0 {
+		fmt.Println("成功从", len(allPeers), "个Peer获取连接")
+		return allPeers
 	}
 
-	fmt.Println("[ERROR] 所有Tracker服务器均未返回有效Peer")
+	fmt.Println("所有Tracker服务器均连接失败")
 	return nil
 }
