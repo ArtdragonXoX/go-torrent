@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"bt_download/bencode"
+	"github.com/jackpal/bencode-go"
 )
 
 type rawInfo struct {
@@ -47,8 +47,8 @@ func ParseFile(r io.Reader) (*TorrentFile, error) {
 
 	// calculate info SHA
 	buf := new(bytes.Buffer)
-	wlen := bencode.Marshal(buf, raw.Info)
-	if wlen == 0 {
+	err = bencode.Marshal(buf, raw.Info)
+	if err != nil {
 		fmt.Println("raw file info error")
 	}
 	ret.InfoSHA = sha1.Sum(buf.Bytes())
