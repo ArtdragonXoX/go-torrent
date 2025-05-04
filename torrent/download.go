@@ -22,6 +22,9 @@ type TorrentTask struct {
 	peerMu       sync.RWMutex
 	peerFailures map[string]int // 记录每个peer的失败次数
 	failureMu    sync.RWMutex   // 保护peerFailures的互斥锁
+	logFile      *os.File       // tracker响应日志文件
+	logMu        sync.Mutex     // 保护日志文件的互斥锁
+	EnableLog    bool           // 是否启用tracker响应日志记录
 }
 
 type pieceTask struct {
@@ -133,6 +136,9 @@ func (state *taskState) handleMsg() error {
 	}
 	return nil
 }
+
+// TorrentTask的logTrackerResponse方法已移至tracker.go文件中
+// 作为独立函数实现，以便在tryTracker函数中使用
 
 // 处理接收到的DHT节点消息
 func handleDHTNodesMsg(conn *PeerConn, msg *PeerMsg) {
@@ -622,8 +628,15 @@ func (t *TorrentTask) requestPEXFromPeers() {
 	}
 }
 
-// Download 下载种子文件，如果所有peer都不可用则终止任务并返回错误
+// download from peers & make file
 func Download(task *TorrentTask) error {
+	// 确保在函数结束时关闭日志文件
+	defer func() {
+		if task.logFile != nil {
+			task.logFile.Close()
+			fmt.Println("[INFO] 已关闭Tracker响应日志文件")
+		}
+	}()
 	var err error
 	fmt.Println("start downloading " + task.FileName)
 

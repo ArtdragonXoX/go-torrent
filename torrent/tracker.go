@@ -2,6 +2,7 @@ package torrent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -207,6 +208,20 @@ func readBackupTrackers(filePath string) []string {
 // 尝试连接tracker服务器并获取peer信息
 // 返回peer信息列表和tracker URL
 func tryTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]PeerInfo, string) {
+	// 创建一个空的TorrentTask用于日志记录
+	// 在FindPeers函数中会检查是否需要记录日志
+	task := &TorrentTask{
+		FileName:     tf.FileName,
+		peerFailures: make(map[string]int),
+	}
+
+	// 检查命令行参数中是否有-log选项
+	for _, arg := range os.Args {
+		if arg == "-log" {
+			task.EnableLog = true
+			break
+		}
+	}
 	// 临时替换Announce URL
 	originalAnnounce := tf.Announce
 	tf.Announce = announceURL
@@ -257,9 +272,23 @@ func tryTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]Peer
 		return nil, announceURL
 	}
 
+	// 读取响应体内容用于日志记录
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("[ERROR] 读取Tracker响应内容失败: %s, 错误: %s\n", announceURL, err.Error())
+		return nil, announceURL
+	}
+
+	// 如果启用了日志记录，记录原始响应数据
+	if task.EnableLog {
+		peerKey := fmt.Sprintf("Tracker:%s", announceURL)
+		// 记录tracker响应日志
+		logTrackerResponse(task, peerKey, "HTTP_RESPONSE", string(respBody))
+	}
+
 	// 解析响应
 	trackResp := new(TrackerResp)
-	err = bencode.Unmarshal(resp.Body, trackResp)
+	err = bencode.Unmarshal(bytes.NewReader(respBody), trackResp)
 	if err != nil {
 		fmt.Printf("[ERROR] Tracker响应解析错误: %s, 错误: %s\n", announceURL, err.Error())
 		return nil, announceURL
@@ -322,6 +351,24 @@ func tryTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]Peer
 // tryUDPTracker 尝试连接UDP协议的Tracker服务器
 // 返回peer信息列表和tracker URL
 func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]PeerInfo, string) {
+	// 创建一个空的TorrentTask用于日志记录
+	task := &TorrentTask{
+		FileName:     tf.FileName,
+		peerFailures: make(map[string]int),
+	}
+
+	// 检查命令行参数中是否有-log选项
+	for _, arg := range os.Args {
+		if arg == "-log" {
+			task.EnableLog = true
+			break
+		}
+	}
+	// 如果启用了日志记录，记录UDP请求数据
+	if task.EnableLog {
+		peerKey := fmt.Sprintf("UDP_Tracker:%s", announceURL)
+		logTrackerResponse(task, peerKey, "UDP_REQUEST", "开始连接UDP Tracker")
+	}
 	// 解析UDP地址
 	u, err := url.Parse(announceURL)
 	if err != nil {
@@ -478,6 +525,12 @@ func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]P
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		n, err = io.ReadFull(conn, headerBuf)
 		if err == nil && n == 20 {
+			// 如果启用了日志记录，记录UDP响应头部数据
+			if task.EnableLog {
+				peerKey := fmt.Sprintf("UDP_Tracker:%s", announceURL)
+				hexData := fmt.Sprintf("%X", headerBuf)
+				logTrackerResponse(task, peerKey, "UDP_HEADER", hexData)
+			}
 			break
 		}
 		fmt.Printf("[WARNING] 读取UDP announce响应头部失败(尝试 %d/%d): %s\n", i+1, maxRetries, err.Error())
@@ -591,7 +644,48 @@ func tryUDPTracker(announceURL string, tf *TorrentFile, peerId [IDLEN]byte) ([]P
 // FindPeers 从多个tracker服务器获取peer信息
 // 会显示每个tracker服务器提供的peer数量和连接状态
 // 支持IPv4和IPv6两种类型的peer
+// 记录tracker响应日志
+func logTrackerResponse(t *TorrentTask, peerKey string, msgType string, data string) {
+	if t == nil || !t.EnableLog {
+		return
+	}
+
+	t.logMu.Lock()
+	defer t.logMu.Unlock()
+
+	if t.logFile == nil {
+		// 创建日志文件
+		logPath := fmt.Sprintf("%s_tracker.log", t.FileName)
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			fmt.Printf("无法创建日志文件: %v\n", err)
+			return
+		}
+		t.logFile = f
+		fmt.Printf("[INFO] 已创建Tracker响应日志文件: %s\n", logPath)
+	}
+
+	logEntry := fmt.Sprintf("[%s] %s %s: %s\n",
+		time.Now().Format(time.RFC3339), peerKey, msgType, data)
+	if _, err := t.logFile.WriteString(logEntry); err != nil {
+		fmt.Printf("写入日志失败: %v\n", err)
+	}
+}
+
 func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
+	// 创建一个空的TorrentTask用于日志记录
+	// 在main.go中会设置EnableLog字段
+	task := &TorrentTask{
+		FileName: tf.FileName,
+	}
+
+	// 检查命令行参数中是否有-log选项
+	for _, arg := range os.Args {
+		if arg == "-log" {
+			task.EnableLog = true
+			break
+		}
+	}
 	fmt.Println("开始查找Peers (支持IPv4和IPv6)...")
 
 	// 获取所有Tracker服务器地址
@@ -626,6 +720,8 @@ func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
 		go func(url string) {
 			// 使用独立的goroutine处理每个tracker请求
 			start := time.Now()
+			// 将task.EnableLog传递给tryTracker函数
+			// 修改tryTracker函数签名，接收enableLog参数
 			peers, trackerURL := tryTracker(url, tf, peerId)
 			elapsed := time.Since(start)
 
@@ -687,6 +783,7 @@ func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
 				peerCount := 0
 				for _, peer := range result.peers {
 					key := peer.Ip.String() + ":" + strconv.Itoa(int(peer.Port))
+					fmt.Println("[DEBUG] 从Tracker获取到Peer: ", peer.Ip.String(), ":", peer.Port)
 					if _, exists := peerSet[key]; !exists {
 						peerSet[key] = peer
 						allPeers = append(allPeers, peer)
