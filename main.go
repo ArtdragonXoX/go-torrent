@@ -13,22 +13,11 @@ func main() {
 	// 检查命令行参数
 	if len(os.Args) < 2 {
 		fmt.Println("用法: main.exe <torrent文件路径> [-log]")
-		fmt.Println("  -log: 启用tracker响应数据日志记录")
 		return
 	}
 
 	// 解析命令行参数
 	torrentFilePath := os.Args[1]
-	enableLog := false
-
-	// 检查是否有-log参数
-	for i := 2; i < len(os.Args); i++ {
-		if os.Args[i] == "-log" {
-			enableLog = true
-			fmt.Println("已启用tracker响应数据日志记录")
-			break
-		}
-	}
 
 	//parse torrent file
 	file, err := os.Open(torrentFilePath)
@@ -53,14 +42,13 @@ func main() {
 	}
 	// build torrent task
 	task := &torrent.TorrentTask{
-		PeerId:    peerId,
-		PeerList:  peers,
-		InfoSHA:   tf.InfoSHA,
-		FileName:  tf.FileName,
-		FileLen:   tf.FileLen,
-		PieceLen:  tf.PieceLen,
-		PieceSHA:  tf.PieceSHA,
-		EnableLog: enableLog,
+		PeerId:   peerId,
+		PeerList: peers,
+		InfoSHA:  tf.InfoSHA,
+		FileName: tf.FileName,
+		FileLen:  tf.FileLen,
+		PieceLen: tf.PieceLen,
+		PieceSHA: tf.PieceSHA,
 	}
 	//download from peers & make file
 	err = torrent.Download(task)
