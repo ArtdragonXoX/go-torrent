@@ -1,7 +1,6 @@
 package torrent
 
 import (
-	"bt_download/bencode"
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha1"
@@ -11,6 +10,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/jackpal/bencode-go"
 )
 
 const (
