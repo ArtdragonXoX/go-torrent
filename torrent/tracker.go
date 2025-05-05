@@ -14,7 +14,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackpal/bencode-go"
@@ -29,11 +28,6 @@ const (
 )
 
 const IDLEN int = 20
-
-type PeerInfo struct {
-	Ip   net.IP
-	Port uint16
-}
 
 type TrackerResp struct {
 	Interval int    `bencode:"interval"`
@@ -491,16 +485,11 @@ func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
 
 	// 创建channel用于接收结果，包含tracker地址和对应的peers
 	resultChan := make(chan TrackerResult, len(trackers))
-
-	// 使用WaitGroup确保所有goroutine完成
-	var wg sync.WaitGroup
+	defer close(resultChan)
 
 	// 并发请求所有Tracker服务器
 	for _, tracker := range trackers {
-		wg.Add(1)
 		go func(url string) {
-			defer wg.Done()
-
 			// 将[20]byte类型转换为[]byte和string类型
 			infoHashSlice := tf.InfoSHA[:] // 将[20]byte转换为[]byte
 			peerIdStr := string(peerId[:]) // 将[20]byte转换为string
@@ -533,12 +522,6 @@ func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
 		}(tracker)
 	}
 
-	// 启动一个goroutine等待所有请求完成并关闭channel
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
 	// 收集并合并结果
 	peerSet := make(map[string]PeerInfo)
 	var allPeers []PeerInfo
@@ -546,7 +529,8 @@ func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
 	totalCount := 0
 
 	// 处理每个tracker的结果
-	for result := range resultChan {
+	for range len(trackers) {
+		result := <-resultChan
 		totalCount++
 		progressStr := fmt.Sprintf("[%d/%d]", totalCount, len(trackers))
 

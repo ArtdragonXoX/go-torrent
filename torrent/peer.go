@@ -10,6 +10,16 @@ import (
 	"time"
 )
 
+type PeerInfo struct {
+	Ip   net.IP
+	Port uint16
+}
+
+type PeerWithStatus struct {
+	PeerInfo
+	ErrorCount int
+}
+
 type MsgId uint8
 
 const (

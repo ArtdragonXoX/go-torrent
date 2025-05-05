@@ -48,26 +48,6 @@ func main() {
 	// random peerId
 	var peerId [torrent.IDLEN]byte
 	_, _ = rand.Read(peerId[:])
-	//connect tracker & find peers
-	peers := torrent.FindPeers(tf, peerId)
-	if len(peers) == 0 {
-		fmt.Println("can not find peers")
-		return
-	}
-	// build torrent task
-	task := &torrent.TorrentTask{
-		PeerId:   peerId,
-		PeerList: peers,
-		InfoSHA:  tf.InfoSHA,
-		FileName: tf.FileName,
-		FileLen:  tf.FileLen,
-		PieceLen: tf.PieceLen,
-		PieceSHA: tf.PieceSHA,
-	}
-	//download from peers & make file
-	err = torrent.Download(task)
-	if err != nil {
-		fmt.Printf("下载失败: %v\n", err)
-		return
-	}
+	// build peer manager
+	torrent.Download(peerId, tf)
 }

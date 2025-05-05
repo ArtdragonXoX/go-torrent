@@ -9,8 +9,6 @@ import (
 )
 
 type TorrentTask struct {
-	PeerId   [20]byte
-	PeerList []PeerInfo
 	InfoSHA  [SHALEN]byte
 	FileName string
 	FileLen  int
@@ -114,38 +112,6 @@ func checkPiece(task *pieceTask, res *pieceResult) bool {
 	return true
 }
 
-func (t *TorrentTask) peerRoutine(peer PeerInfo, taskQueue chan *pieceTask, resultQueue chan *pieceResult) {
-	// set up conn with peer
-	conn, err := NewConn(peer, t.InfoSHA, t.PeerId)
-	if err != nil {
-		fmt.Println("fail to connect peer : " + peer.Ip.String())
-		return
-	}
-	defer conn.Close()
-
-	fmt.Println("complete handshake with peer : " + peer.Ip.String())
-	conn.WriteMsg(&PeerMsg{MsgInterested, nil})
-	// get piece task & download
-	for task := range taskQueue {
-		if !conn.Field.HasPiece(task.index) {
-			taskQueue <- task
-			continue
-		}
-		fmt.Printf("get task, index: %v, peer : %v\n", task.index, peer.Ip.String())
-		res, err := downloadPiece(conn, task)
-		if err != nil {
-			taskQueue <- task
-			fmt.Println("fail to download piece" + err.Error())
-			return
-		}
-		if !checkPiece(task, res) {
-			taskQueue <- task
-			continue
-		}
-		resultQueue <- res
-	}
-}
-
 func (t *TorrentTask) getPieceBounds(index int) (bengin, end int) {
 	bengin = index * t.PieceLen
 	end = bengin + t.PieceLen
@@ -155,37 +121,36 @@ func (t *TorrentTask) getPieceBounds(index int) (bengin, end int) {
 	return
 }
 
-func Download(task *TorrentTask) error {
-	fmt.Println("start downloading " + task.FileName)
-	// split pieceTasks and init task&result channel
-	taskQueue := make(chan *pieceTask, len(task.PieceSHA))
+func (t *TorrentFile) getPieceBounds(index int) (bengin, end int) {
+	bengin = index * t.PieceLen
+	end = bengin + t.PieceLen
+	if end > t.FileLen {
+		end = t.FileLen
+	}
+	return
+}
+
+func Download(peerId [20]byte, tf *TorrentFile) error {
 	resultQueue := make(chan *pieceResult)
-	for index, sha := range task.PieceSHA {
-		begin, end := task.getPieceBounds(index)
-		taskQueue <- &pieceTask{index, sha, (end - begin)}
-	}
-	// init goroutines for each peer
-	for _, peer := range task.PeerList {
-		go task.peerRoutine(peer, taskQueue, resultQueue)
-	}
+	pm := NewPeerManager(peerId, tf, resultQueue)
+	pm.Start()
 	// collect piece result
-	buf := make([]byte, task.FileLen)
+	buf := make([]byte, tf.FileLen)
 	count := 0
-	for count < len(task.PieceSHA) {
+	for count < len(tf.PieceSHA) {
 		res := <-resultQueue
-		begin, end := task.getPieceBounds(res.index)
+		begin, end := tf.getPieceBounds(res.index)
 		copy(buf[begin:end], res.data)
 		count++
 		// print progress
-		percent := float64(count) / float64(len(task.PieceSHA)) * 100
+		percent := float64(count) / float64(len(tf.PieceSHA)) * 100
 		fmt.Printf("downloading, progress : (%0.2f%%)\n", percent)
 	}
-	close(taskQueue)
 	close(resultQueue)
 	// create file & copy data
-	file, err := os.Create(task.FileName)
+	file, err := os.Create(tf.FileName)
 	if err != nil {
-		fmt.Println("fail to create file: " + task.FileName)
+		fmt.Println("fail to create file: " + tf.FileName)
 		return err
 	}
 	_, err = file.Write(buf)
