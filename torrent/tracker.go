@@ -14,9 +14,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackpal/bencode-go"
+	"go.uber.org/zap"
 )
 
 const (
@@ -140,8 +142,15 @@ func fixInfoHashEncoding(rawQuery string, infoHash []byte) string {
 
 // ================= UDP Tracker 交互 =================
 func announceUDP(trackerURL string, infoHash []byte, peerID string, port int) (*TrackerResponse, error) {
-	// 解析 UDP 地址
-	addr, err := net.ResolveUDPAddr("udp", trackerURL[6:]) // 去掉 "udp://" 前缀
+	// 使用url.Parse正确解析UDP地址
+	u, err := url.Parse(trackerURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid UDP tracker URL: %w", err)
+	}
+
+	// 提取主机名和端口
+	hostport := u.Host
+	addr, err := net.ResolveUDPAddr("udp", hostport)
 	if err != nil {
 		return nil, fmt.Errorf("invalid UDP address: %w", err)
 	}
@@ -455,6 +464,14 @@ func readBackupTrackers(filePath string) []string {
 }
 
 /**
+ * TrackerResult 表示单个Tracker的请求结果
+ */
+type TrackerResult struct {
+	URL   string     // Tracker地址
+	Peers []PeerInfo // 获取到的Peer列表
+}
+
+/**
  * FindPeers 从多个Tracker服务器获取Peer信息
  * @param tf *TorrentFile - 种子文件信息
  * @param peerId [IDLEN]byte - 客户端标识
@@ -468,13 +485,22 @@ func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
 		trackers = append(trackers, backupTrackers...)
 	}
 
-	// 创建channel用于接收结果
-	peerChan := make(chan []PeerInfo, len(trackers))
-	var allPeers []PeerInfo
+	logger.Info("开始从Tracker获取Peer",
+		zap.Int("tracker总数", len(trackers)),
+		zap.String("种子名称", tf.FileName))
+
+	// 创建channel用于接收结果，包含tracker地址和对应的peers
+	resultChan := make(chan TrackerResult, len(trackers))
+
+	// 使用WaitGroup确保所有goroutine完成
+	var wg sync.WaitGroup
 
 	// 并发请求所有Tracker服务器
 	for _, tracker := range trackers {
+		wg.Add(1)
 		go func(url string) {
+			defer wg.Done()
+
 			// 将[20]byte类型转换为[]byte和string类型
 			infoHashSlice := tf.InfoSHA[:] // 将[20]byte转换为[]byte
 			peerIdStr := string(peerId[:]) // 将[20]byte转换为string
@@ -482,42 +508,81 @@ func FindPeers(tf *TorrentFile, peerId [IDLEN]byte) []PeerInfo {
 			// 请求Tracker服务器
 			resp, err := AnnounceToTracker(url, infoHashSlice, peerIdStr, PeerPort)
 			if err != nil || resp == nil {
-				peerChan <- nil
+				logger.Warn("Tracker请求失败",
+					zap.String("tracker", url),
+					zap.Error(err))
+				resultChan <- TrackerResult{URL: url, Peers: nil}
 				return
 			}
 
 			// 解析响应获取Peer列表
 			peers, err := ParsePeersFromResponse(resp)
 			if err != nil {
-				peerChan <- nil
+				logger.Warn("解析Tracker响应失败",
+					zap.String("tracker", url),
+					zap.Error(err))
+				resultChan <- TrackerResult{URL: url, Peers: nil}
 				return
 			}
 
-			peerChan <- peers
+			logger.Info("Tracker响应成功",
+				zap.String("tracker", url),
+				zap.Int("peers数量", len(peers)))
+
+			resultChan <- TrackerResult{URL: url, Peers: peers}
 		}(tracker)
 	}
 
+	// 启动一个goroutine等待所有请求完成并关闭channel
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
 	// 收集并合并结果
 	peerSet := make(map[string]PeerInfo)
-	for i := 0; i < len(trackers); i++ {
-		peers := <-peerChan
-		if peers != nil {
-			for _, peer := range peers {
-				key := peer.Ip.String() + ":" + strconv.Itoa(int(peer.Port))
-				if _, exists := peerSet[key]; !exists {
-					fmt.Println("成功从", trackers[i], "连接到Peer:", peer.Ip, "端口:", peer.Port)
-					peerSet[key] = peer
-					allPeers = append(allPeers, peer)
-				}
+	var allPeers []PeerInfo
+	successCount := 0
+	totalCount := 0
+
+	// 处理每个tracker的结果
+	for result := range resultChan {
+		totalCount++
+		progressStr := fmt.Sprintf("[%d/%d]", totalCount, len(trackers))
+
+		if result.Peers == nil || len(result.Peers) == 0 {
+			logger.Info(progressStr+" Tracker无可用Peer",
+				zap.String("tracker", result.URL))
+			continue
+		}
+
+		successCount++
+		addedCount := 0
+
+		// 添加新的peers到结果集
+		for _, peer := range result.Peers {
+			key := peer.Ip.String() + ":" + strconv.Itoa(int(peer.Port))
+			if _, exists := peerSet[key]; !exists {
+				peerSet[key] = peer
+				allPeers = append(allPeers, peer)
+				addedCount++
 			}
 		}
+
+		logger.Info(progressStr+" Tracker获取Peer成功",
+			zap.String("tracker", result.URL),
+			zap.Int("获取数量", len(result.Peers)),
+			zap.Int("新增数量", addedCount))
 	}
 
 	if len(allPeers) > 0 {
-		fmt.Println("成功从", len(allPeers), "个Peer获取连接")
+		logger.Info("Peer获取完成",
+			zap.Int("成功tracker数", successCount),
+			zap.Int("总tracker数", len(trackers)),
+			zap.Int("总peer数", len(allPeers)))
 		return allPeers
 	}
 
-	fmt.Println("所有Tracker服务器均连接失败")
+	logger.Error("所有Tracker服务器均连接失败")
 	return nil
 }
