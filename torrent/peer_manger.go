@@ -12,6 +12,10 @@ import (
 
 const ERROR_COUNT = 5
 
+var (
+	UpdatePeerTime = 5
+)
+
 type PeerManager struct {
 	peerId      [20]byte
 	tf          *TorrentFile
@@ -354,7 +358,7 @@ func (pm *PeerManager) StopAllPeers() {
 // Start 启动PeerManager，开始从Tracker获取Peer，并启动所有已添加的peers的连接
 func (pm *PeerManager) Start() {
 	// 启动定时更新Peer的goroutine
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(time.Duration(UpdatePeerTime) * time.Minute)
 	go func() {
 		pm.updatePeerFromTracker()
 		for {
